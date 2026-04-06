@@ -23,7 +23,7 @@ Google Drive 文件列表服务，带登录保护，支持免密下载链接。
 
 > ⚠️ **必须执行第 6 步**，否则 GDList 读取不到任何文件。Service Account 本身无 Drive 文件，需共享才有权限。
 
----
+
 ### 前置工作2：获取共享文件夹的ID，
     -即：“https://drive.google.com/drive/folders/”后面的长串字母
 
@@ -79,6 +79,17 @@ gdlist/
 - **会话**：express-session + HttpOnly Cookie，24 小时
 - **前端**：单 HTML 文件，零依赖
 
+---
+
+## 彻底删除
+```bash
+sudo systemctl stop gdlist 2>/dev/null || true
+sudo systemctl disable gdlist 2>/dev/null || true
+sudo rm -f /etc/systemd/system/gdlist.service
+sudo systemctl daemon-reload
+sudo rm -rf /opt/gdlist
+echo "GDList 已彻底删除！"
+```
 ---
 
 ### 常见问题
