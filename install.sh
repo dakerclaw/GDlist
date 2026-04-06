@@ -136,8 +136,13 @@ SA_EMAIL=$(node -e "
 
 echo ""
 info "Service Account 邮箱: $SA_EMAIL"
-echo -e "  ${YELLOW}⚠  请将 Drive 文件夹共享给以上邮箱，否则 GDList 无法读取任何文件！${NC}"
-prompt "确认已共享（或稍后再共享），按回车继续…"; read -r
+echo -e "  ${YELLOW}⚠  请将 Drive 文件夹共享给以上邮箱（权限：查看者）${NC}"
+echo "  文件夹 ID 获取：打开 Drive 目标文件夹，复制 URL 中 /folders/ 后面的字符串"
+prompt "文件夹 ID:"; read -r ROOT_FOLDER_ID
+while [ -z "$ROOT_FOLDER_ID" ]; do
+  prompt "文件夹 ID 不能为空，重输:"; read -r ROOT_FOLDER_ID
+done
+info "文件夹 ID: $ROOT_FOLDER_ID"
 
 # ── 5. 写入配置并启动 ─────────────────────────────────────────────────────
 section "步骤 5/5  写入配置并启动"
@@ -151,6 +156,7 @@ SESSION_SECRET=${SESSION_SECRET}
 ADMIN_USERNAME=${ADMIN_USERNAME}
 ADMIN_PASSWORD_HASH=${ADMIN_HASH}
 GOOGLE_SERVICE_ACCOUNT_JSON=${INSTALL_DIR}/service-account-key.json
+ROOT_FOLDER_ID=${ROOT_FOLDER_ID}
 ENVEOF
 
 chmod 600 "$INSTALL_DIR/.env"
