@@ -1,0 +1,349 @@
+'use strict';
+
+require('dotenv').config();
+const express = require('express');
+const session = require('express-session');
+const cookieParser = require('cookie-parser');
+const bcrypt = require('bcryptjs');
+const multer = require('multer');
+const path = require('path');
+const { google } = require('googleapis');
+
+// Multer: keep files in memory, pass directly to Drive API
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 * 1024 } }); // 10 GB limit
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+// Service Account 无法访问 'root'，需指定被共享的文件夹 ID
+const ROOT_FOLDER_ID = process.env.ROOT_FOLDER_ID || 'root';
+
+// ─── Middleware ────────────────────────────────────────────────────────────
+app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+app.use(cookieParser());
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'change-me-in-production',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    maxAge: 24 * 60 * 60 * 1000 // 24h
+  }
+}));
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ─── Google Drive — Service Account Auth ──────────────────────────────────
+//
+// Service Account 认证优势：
+//   - 纯服务端完成，无需浏览器
+//   - 凭据永久有效，不会过期
+//   - 不需要配置"已授权重定向 URI"
+//
+// 使用方式：
+//   1. 在 Google Cloud Console 创建 Service Account，下载 JSON 密钥文件
+//   2. 将你想让 GDList 访问的 Drive 文件夹共享给 Service Account 邮箱
+//      （Service Account 邮箱格式：<name>@<project>.iam.gserviceaccount.com）
+//   3. 将 JSON 密钥文件上传到服务器，在 .env 中指定路径
+//
+let _drive = null;
+
+function getDriveClient() {
+  if (_drive) return _drive;
+
+  const keyPath = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!keyPath) {
+    throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON 环境变量未设置。请在 .env 中指定 Service Account JSON 密钥文件路径。');
+  }
+
+  // 动态加载（避免 require 找不到文件时报错）
+  let credentials;
+  try {
+    credentials = require(path.resolve(keyPath));
+  } catch (e) {
+    throw new Error(`无法读取 Service Account 密钥文件: ${keyPath}，错误: ${e.message}`);
+  }
+
+  const auth = new google.auth.JWT(
+    credentials.client_email,
+    null,
+    credentials.private_key,
+    ['https://www.googleapis.com/auth/drive']
+  );
+
+  _drive = google.drive({ version: 'v3', auth });
+  return _drive;
+}
+
+// ─── Auth Guard ───────────────────────────────────────────────────────────
+function requireLogin(req, res, next) {
+  if (req.session && req.session.authenticated) return next();
+  res.status(401).json({ error: 'Unauthorized' });
+}
+
+// ─── Routes ───────────────────────────────────────────────────────────────
+
+// Login
+app.post('/api/login', async (req, res) => {
+  const { username, password } = req.body;
+  const validUser = process.env.ADMIN_USERNAME || 'admin';
+  const validHash = process.env.ADMIN_PASSWORD_HASH;
+
+  if (!validHash) {
+    return res.status(500).json({ error: 'Server not configured (missing ADMIN_PASSWORD_HASH)' });
+  }
+
+  const userOk = username === validUser;
+  const passOk = await bcrypt.compare(password, validHash);
+
+  if (userOk && passOk) {
+    req.session.authenticated = true;
+    req.session.username = username;
+    return res.json({ ok: true });
+  }
+  res.status(401).json({ error: 'Invalid username or password' });
+});
+
+// Logout
+app.post('/api/logout', (req, res) => {
+  req.session.destroy(() => res.json({ ok: true }));
+});
+
+// Auth status
+app.get('/api/auth', (req, res) => {
+  res.json({ authenticated: !!(req.session && req.session.authenticated) });
+});
+
+// List files in a folder
+app.get('/api/files', requireLogin, async (req, res) => {
+  const folderId = req.query.folderId || ROOT_FOLDER_ID;
+  try {
+    const drive = getDriveClient();
+    const response = await drive.files.list({
+      q: `'${folderId}' in parents and trashed = false`,
+      fields: 'files(id,name,mimeType,size,modifiedTime,parents)',
+      orderBy: 'folder,name',
+      pageSize: 1000
+    });
+    res.json({ files: response.data.files || [] });
+  } catch (err) {
+    console.error('[Drive] 文件列表错误:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get folder breadcrumb path
+app.get('/api/path', requireLogin, async (req, res) => {
+  const folderId = req.query.folderId || ROOT_FOLDER_ID;
+  if (folderId === ROOT_FOLDER_ID) {
+    // 根目录：直接返回根节点名称（尝试从 Drive 读取，失败则用 'My Drive'）
+    try {
+      const drive = getDriveClient();
+      if (ROOT_FOLDER_ID === 'root') {
+        return res.json({ path: [{ id: ROOT_FOLDER_ID, name: 'My Drive' }] });
+      }
+      const meta = await drive.files.get({ fileId: ROOT_FOLDER_ID, fields: 'id,name' });
+      return res.json({ path: [{ id: ROOT_FOLDER_ID, name: meta.data.name }] });
+    } catch {
+      return res.json({ path: [{ id: ROOT_FOLDER_ID, name: 'My Drive' }] });
+    }
+  }
+
+  try {
+    const drive = getDriveClient();
+    const chain = [];
+    let current = folderId;
+
+    while (current && current !== ROOT_FOLDER_ID) {
+      const meta = await drive.files.get({
+        fileId: current,
+        fields: 'id,name,parents'
+      });
+      chain.unshift({ id: meta.data.id, name: meta.data.name });
+      current = meta.data.parents ? meta.data.parents[0] : null;
+    }
+    // 把根节点名称也补进面包屑
+    try {
+      const drive2 = getDriveClient();
+      const rootName = ROOT_FOLDER_ID === 'root' ? 'My Drive'
+        : (await drive2.files.get({ fileId: ROOT_FOLDER_ID, fields: 'name' })).data.name;
+      chain.unshift({ id: ROOT_FOLDER_ID, name: rootName });
+    } catch {
+      chain.unshift({ id: ROOT_FOLDER_ID, name: 'My Drive' });
+    }
+    res.json({ path: chain });
+  } catch (err) {
+    console.error('[Drive] 路径错误:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Generate a public (token-signed) download link
+// The link embeds a signed token so no login is required to download
+app.get('/api/share/:fileId', requireLogin, (req, res) => {
+  const { fileId } = req.params;
+  const token = Buffer.from(JSON.stringify({
+    id: fileId
+    // no expiry — links are permanent
+  })).toString('base64url');
+  const host = `${req.protocol}://${req.get('host')}`;
+  res.json({ url: `${host}/dl/${token}` });
+});
+
+// Generate a signed preview token (login required)
+app.get('/api/preview/:fileId', requireLogin, (req, res) => {
+  const { fileId } = req.params;
+  const token = Buffer.from(JSON.stringify({ id: fileId })).toString('base64url');
+  const host = `${req.protocol}://${req.get('host')}`;
+  res.json({ token, url: `${host}/pv/${token}` });
+});
+
+// Public inline preview endpoint (serves raw file, no conversion)
+app.get('/pv/:token', async (req, res) => {
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(req.params.token, 'base64url').toString());
+  } catch {
+    return res.status(400).send('Invalid token');
+  }
+
+  try {
+    const drive = getDriveClient();
+    const meta = await drive.files.get({
+      fileId: payload.id,
+      fields: 'name,mimeType,size'
+    });
+    const { name, mimeType } = meta.data;
+
+    const disposition = mimeType.startsWith('text/')
+      || mimeType === 'application/json'
+      || mimeType.startsWith('image/')
+      || mimeType === 'application/pdf'
+      || mimeType.startsWith('video/')
+      || mimeType.startsWith('audio/')
+      ? 'inline'
+      : 'attachment';
+
+    res.setHeader('Content-Disposition', `${disposition}; filename*=UTF-8''${encodeURIComponent(name)}`);
+    res.setHeader('Content-Type', mimeType || 'application/octet-stream');
+
+    const stream = await drive.files.get(
+      { fileId: payload.id, alt: 'media' },
+      { responseType: 'stream' }
+    );
+    stream.data.pipe(res);
+  } catch (err) {
+    console.error('[Drive] 预览错误:', err.message);
+    res.status(500).send('Preview failed: ' + err.message);
+  }
+});
+
+// Binary preview data endpoint (returns raw bytes, for client-side Office renderers)
+// Supports Google Workspace export (docx/xlsx) natively
+app.get('/api/preview-data/:fileId', requireLogin, async (req, res) => {
+  const { fileId } = req.params;
+  try {
+    const drive = getDriveClient();
+    const meta = await drive.files.get({
+      fileId,
+      fields: 'name,mimeType,size'
+    });
+    const { name, mimeType } = meta.data;
+
+    // Google Workspace native formats → export as docx/xlsx
+    const EXPORT_TYPES = {
+      'application/vnd.google-apps.document': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.google-apps.spreadsheet': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.google-apps.presentation': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    };
+    const exportMime = EXPORT_TYPES[mimeType];
+
+    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(name)}`);
+    res.setHeader('Content-Type', exportMime || mimeType);
+
+    const stream = exportMime
+      ? await drive.files.export({ fileId, mimeType: exportMime }, { responseType: 'stream' })
+      : await drive.files.get({ fileId, alt: 'media' }, { responseType: 'stream' });
+
+    stream.data.pipe(res);
+  } catch (err) {
+    console.error('[Drive] preview-data error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Public download endpoint — no login required
+app.get('/dl/:token', async (req, res) => {
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(req.params.token, 'base64url').toString());
+  } catch {
+    return res.status(400).send('Invalid link');
+  }
+  try {
+    const drive = getDriveClient();
+    const meta = await drive.files.get({
+      fileId: payload.id,
+      fields: 'name,mimeType,size'
+    });
+
+    const { name, mimeType } = meta.data;
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
+    res.setHeader('Content-Type', mimeType || 'application/octet-stream');
+
+    const stream = await drive.files.get(
+      { fileId: payload.id, alt: 'media' },
+      { responseType: 'stream' }
+    );
+    stream.data.pipe(res);
+  } catch (err) {
+    console.error('[Drive] 下载错误:', err.message);
+    res.status(500).send('Download failed: ' + err.message);
+  }
+});
+
+// ── Upload a file to the current folder ────────────────────────────────────
+app.post('/api/upload', requireLogin, upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: '没有上传文件' });
+
+  const folderId = req.body.folderId || ROOT_FOLDER_ID;
+  const fileName  = req.body.name || req.file.originalname;
+
+  try {
+    const drive = getDriveClient();
+    const { buffer, mimetype } = req.file;
+
+    const result = await drive.files.create({
+      resource: { name: fileName, parents: [folderId] },
+      media: { body: require('stream').Readable.from(buffer), mimeType: mimetype },
+      fields: 'id,name,mimeType,size,modifiedTime'
+    });
+
+    res.json({ ok: true, file: result.data });
+  } catch (err) {
+    console.error('[Drive] 上传错误:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Delete a file ───────────────────────────────────────────────────────────
+app.delete('/api/files/:fileId', requireLogin, async (req, res) => {
+  const { fileId } = req.params;
+  try {
+    const drive = getDriveClient();
+    await drive.files.delete({ fileId });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Drive] 删除错误:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Fallback → SPA index
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// ─── Start ────────────────────────────────────────────────────────────────
+app.listen(PORT, () => {
+  console.log(`GDList running on http://localhost:${PORT}`);
+});
