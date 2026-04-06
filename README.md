@@ -82,6 +82,16 @@ gdlist/
 
 ---
 
+## 彻底删除程序
+```bash
+sudo systemctl stop gdlist 2>/dev/null || true
+sudo systemctl disable gdlist 2>/dev/null || true
+sudo rm -f /etc/systemd/system/gdlist.service
+sudo systemctl daemon-reload
+sudo rm -rf /opt/gdlist
+echo "GDList 已彻底删除！"
+---
+
 ## 常见问题
 
 **Q: 显示"找不到文件"？**  
