@@ -70,7 +70,7 @@ gdlist/
     └── index.html         ← 前端（纯原生 HTML/CSS/JS，无依赖）
 ---
 
-
+---
 ## 技术细节
 
 - **认证**：Google Service Account（JWT 签名），纯服务端，无需浏览器，凭据不过期
@@ -79,8 +79,7 @@ gdlist/
 - **会话**：express-session + HttpOnly Cookie，24 小时
 - **前端**：单 HTML 文件，零依赖
 
-
-
+---
 ### 常见问题
 
 **Q: 显示"找不到文件"？**  
