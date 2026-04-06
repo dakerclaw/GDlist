@@ -174,7 +174,7 @@
 
 <script>
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
-let currentFolder = 'root';
+let currentFolder = '';  // 空字符串会触发后端 ROOT_FOLDER_ID
 
 // ── Utility ───────────────────────────────────────────────────────────────
 function fmtSize(bytes) {
@@ -236,7 +236,7 @@ async function doLogout() {
 function showApp() {
   document.getElementById('login-page').style.display = 'none';
   document.getElementById('app-page').style.display = 'block';
-  loadFiles('root');
+  loadFiles('');  // 空字符串触发后端 ROOT_FOLDER_ID
 }
 
 // ── File listing ──────────────────────────────────────────────────────────
