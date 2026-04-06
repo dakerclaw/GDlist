@@ -4,9 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>GDList</title>
-<!-- Office preview libraries (loaded lazily on first use) -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.11.0/mammoth.browser.min.js"></script>
-<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -78,6 +75,25 @@
   .breadcrumb a { color: var(--accent); text-decoration: none; cursor: pointer; }
   .breadcrumb a:hover { text-decoration: underline; }
 
+  /* toolbar */
+  .toolbar {
+    display: flex; gap: 10px; margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .search-input {
+    flex: 1; min-width: 200px;
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 7px 12px; font-size: 13px; outline: none;
+    transition: border-color .15s;
+  }
+  .search-input:focus { border-color: var(--accent); }
+  .sort-select {
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 7px 12px; font-size: 13px; background: var(--surface);
+    cursor: pointer; outline: none;
+  }
+  .sort-select:focus { border-color: var(--accent); }
+
   /* file table */
   .file-table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
   .file-table th {
@@ -144,6 +160,30 @@
   }
   #preview-area iframe { width: 100%; height: 100%; border: none; }
   .no-preview {
+
+  /* ── Responsive / Mobile ── */
+  @media (max-width: 640px) {
+    header { padding: 0 12px; }
+    header .logo { font-size: 14px; }
+    header .user-info { display: none; }
+    .container { padding: 12px 8px; }
+    .file-table { font-size: 13px; }
+    .file-table th, .file-table td { padding: 8px 10px; }
+    .col-size, .col-modified { display: none; }
+    .col-name { width: auto; }
+    .col-action { width: auto; }
+    .btn-sm { padding: 3px 8px; font-size: 11px; }
+    .toolbar { flex-direction: column; }
+    .search-input { min-width: unset; width: 100%; }
+    .sort-select { width: 100%; }
+  }
+
+  /* ── Results count ── */
+  .results-info {
+    font-size: 12px; color: var(--text-muted);
+    margin-bottom: 8px; min-height: 18px;
+  }
+
     display: flex; align-items: center; justify-content: center;
     height: 100%; color: var(--text-muted); font-size: 14px;
   }
@@ -177,6 +217,21 @@
   <div class="container">
     <div class="breadcrumb" id="breadcrumb"></div>
 
+    <!-- Search and Sort Bar -->
+    <div class="toolbar">
+      <input type="text" id="search-input" class="search-input" placeholder="🔍 搜索文件…" oninput="handleSearch(this.value)">
+      <select id="sort-select" class="sort-select" onchange="handleSort(this.value)">
+        <option value="folder,name">默认排序</option>
+        <option value="name">按名称 ↑</option>
+        <option value="name desc">按名称 ↓</option>
+        <option value="size">按大小 ↑</option>
+        <option value="size desc">按大小 ↓</option>
+        <option value="modifiedTime">最新在前</option>
+        <option value="modifiedTime desc">最旧在前</option>
+      </select>
+    </div>
+    <div class="results-info" id="results-info"></div>
+
     <table class="file-table" id="file-table">
       <thead>
         <tr>
@@ -208,7 +263,10 @@
 
 <script>
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
-let currentFolder = '';  // 空字符串会触发后端 ROOT_FOLDER_ID
+let currentFolder = '';   // 空字符串会触发后端 ROOT_FOLDER_ID
+let allFiles = [];         // 缓存所有文件
+let currentSearch = '';
+let currentSort = 'folder,name';
 
 // ── Utility ───────────────────────────────────────────────────────────────
 function fmtSize(bytes) {
@@ -233,6 +291,29 @@ function fileIcon(mimeType) {
   if (mimeType.includes('spreadsheet') || mimeType.includes('excel')) return '📊';
   if (mimeType.includes('document') || mimeType.includes('word')) return '📝';
   return '📎';
+}
+// XSS 防护：转义 HTML 特殊字符
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// 懒加载外部 CDN 脚本（仅首次使用时加载）
+const _scriptCache = {};
+async function loadScript(url, globalVar) {
+  if (_scriptCache[url]) return window[globalVar];
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = url;
+    s.onload = () => { _scriptCache[url] = true; resolve(window[globalVar]); };
+    s.onerror = () => reject(new Error('CDN 加载失败: ' + url));
+    document.head.appendChild(s);
+  });
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────
@@ -278,30 +359,68 @@ async function loadFiles(folderId) {
   currentFolder = folderId;
   const tbody = document.getElementById('file-list');
   tbody.innerHTML = '<tr><td colspan="4" class="loading">加载中…</td></tr>';
+  document.getElementById('results-info').textContent = '';
 
   // breadcrumb
   loadBreadcrumb(folderId);
 
   const r = await fetch('/api/files?folderId=' + encodeURIComponent(folderId));
   if (!r.ok) {
-    tbody.innerHTML = `<tr><td colspan="4" class="empty">加载失败: ${(await r.json()).error}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="4" class="empty">加载失败: ${escapeHtml((await r.json()).error)}</td></tr>`;
     return;
   }
   const { files } = await r.json();
+  allFiles = files || [];
+
+  // 重置搜索和排序
+  currentSearch = '';
+  document.getElementById('search-input').value = '';
+  document.getElementById('sort-select').value = 'folder,name';
+  currentSort = 'folder,name';
+
+  renderFiles();
+}
+
+function renderFiles() {
+  const tbody = document.getElementById('file-list');
+  const resultsInfo = document.getElementById('results-info');
+
+  // 过滤
+  let files = allFiles;
+  if (currentSearch.trim()) {
+    const q = currentSearch.trim().toLowerCase();
+    files = files.filter(f => f.name.toLowerCase().includes(q));
+  }
+
+  // 排序
+  files = sortFiles(files, currentSort);
+
+  // 显示结果数量
+  if (currentSearch.trim()) {
+    resultsInfo.textContent = `共 ${allFiles.length} 个文件，已筛选 ${files.length} 个`;
+  } else if (files.length > 0) {
+    resultsInfo.textContent = `共 ${files.length} 个文件`;
+  } else {
+    resultsInfo.textContent = '';
+  }
+
   if (!files.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty">此文件夹为空</td></tr>';
+    tbody.innerHTML = `<tr><td colspan="4" class="empty">${currentSearch.trim() ? '没有匹配的文件' : '此文件夹为空'}</td></tr>`;
     return;
   }
 
   tbody.innerHTML = files.map(f => {
     const isFolder = f.mimeType === FOLDER_MIME;
+    const escapedName = escapeHtml(f.name);
+    const safeId = escapeHtml(f.id);
+    const safeMime = escapeHtml(f.mimeType);
     const nameCell = isFolder
-      ? `<a onclick="loadFiles('${f.id}')">${f.name}</a>`
-      : `<span>${f.name}</span>`;
+      ? `<a onclick="loadFiles('${safeId}')">${escapedName}</a>`
+      : `<span>${escapedName}</span>`;
     const actionCell = isFolder
       ? ''
-      : `<button class="btn btn-outline btn-sm" onclick="doPreview('${f.id}', '${f.mimeType}')">预览</button>
-         <button class="btn btn-outline btn-sm" onclick="getShareLink('${f.id}')">分享</button>`;
+      : `<button class="btn btn-outline btn-sm" onclick="doPreview('${safeId}', '${safeMime}')">预览</button>
+         <button class="btn btn-outline btn-sm" onclick="getShareLink('${safeId}')">分享</button>`;
     return `<tr>
       <td class="col-name">
         <div class="file-name">
@@ -315,6 +434,53 @@ async function loadFiles(folderId) {
   }).join('');
 }
 
+function sortFiles(files, sortKey) {
+  const isDesc = sortKey.includes(' desc');
+  const key = sortKey.replace(' desc', '');
+
+  return [...files].sort((a, b) => {
+    const isAFolder = a.mimeType === FOLDER_MIME;
+    const isBFolder = b.mimeType === FOLDER_MIME;
+
+    if (sortKey === 'folder,name') {
+      // 默认：文件夹优先，按名称排序
+      if (isAFolder !== isBFolder) return isAFolder ? -1 : 1;
+      return a.name.localeCompare(b.name, 'zh-CN');
+    }
+
+    // 文件夹始终排在前面
+    if (isAFolder !== isBFolder) return isAFolder ? -1 : 1;
+
+    if (key === 'name') {
+      return isDesc
+        ? b.name.localeCompare(a.name, 'zh-CN')
+        : a.name.localeCompare(b.name, 'zh-CN');
+    }
+    if (key === 'size') {
+      const aSize = parseInt(a.size) || 0;
+      const bSize = parseInt(b.size) || 0;
+      return isDesc ? bSize - aSize : aSize - bSize;
+    }
+    if (key === 'modifiedTime') {
+      const aTime = new Date(a.modifiedTime || 0).getTime();
+      const bTime = new Date(b.modifiedTime || 0).getTime();
+      return isDesc ? bTime - aTime : aTime - bTime;
+    }
+    return 0;
+  });
+}
+
+// ── Search & Sort Handlers ─────────────────────────────────────────────────
+function handleSearch(value) {
+  currentSearch = value;
+  renderFiles();
+}
+
+function handleSort(value) {
+  currentSort = value;
+  renderFiles();
+}
+
 async function loadBreadcrumb(folderId) {
   const bc = document.getElementById('breadcrumb');
   bc.innerHTML = '';
@@ -324,9 +490,9 @@ async function loadBreadcrumb(folderId) {
   path.forEach((seg, i) => {
     if (i > 0) bc.insertAdjacentHTML('beforeend', '<span>/</span>');
     if (i === path.length - 1) {
-      bc.insertAdjacentHTML('beforeend', `<span>${seg.name}</span>`);
+      bc.insertAdjacentHTML('beforeend', `<span>${escapeHtml(seg.name)}</span>`);
     } else {
-      bc.insertAdjacentHTML('beforeend', `<a onclick="loadFiles('${seg.id}')">${seg.name}</a>`);
+      bc.insertAdjacentHTML('beforeend', `<a onclick="loadFiles('${escapeHtml(seg.id)}')">${escapeHtml(seg.name)}</a>`);
     }
   });
 }
@@ -424,10 +590,12 @@ async function doPreview(fileId, mimeType) {
       return;
     }
 
-    // ── Office files — fetch binary, render client-side ─────────────────────
+    // ── Office files — fetch binary, render client-side (lazy-load CDN) ─────
     // Word: .docx  and  Google Docs
     if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
       || mimeType === 'application/vnd.google-apps.document') {
+      area.innerHTML = '<div class="no-preview">正在加载预览器…</div>';
+      const mammoth = await loadScript('https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.11.0/mammoth.browser.min.js', 'mammoth');
       const r = await fetch('/api/preview-data/' + fileId);
       if (!r.ok) throw new Error((await r.json()).error);
       const ab = await r.arrayBuffer();
@@ -442,6 +610,8 @@ async function doPreview(fileId, mimeType) {
       || mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
       || mimeType === 'application/vnd.ms-excel'
       || mimeType === 'application/vnd.google-apps.spreadsheet') {
+      area.innerHTML = '<div class="no-preview">正在加载预览器…</div>';
+      const XLSX = await loadScript('https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js', 'XLSX');
       const r = await fetch('/api/preview-data/' + fileId);
       if (!r.ok) throw new Error((await r.json()).error);
       const ab = await r.arrayBuffer();
@@ -472,14 +642,6 @@ async function doPreview(fileId, mimeType) {
 
 function closePreview() {
   document.getElementById('preview-modal').classList.remove('open');
-}
-
-function escapeHtml(str) {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }
 
 // enter key on login
