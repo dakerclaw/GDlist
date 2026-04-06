@@ -193,7 +193,7 @@ app.get('/api/preview/:fileId', requireLogin, (req, res) => {
   res.json({ token, url: `${host}/pv/${token}` });
 });
 
-// Public inline preview endpoint
+// Public inline preview endpoint (serves raw file, no conversion)
 app.get('/pv/:token', async (req, res) => {
   let payload;
   try {
@@ -208,9 +208,8 @@ app.get('/pv/:token', async (req, res) => {
       fileId: payload.id,
       fields: 'name,mimeType,size'
     });
-
     const { name, mimeType } = meta.data;
-    // inline display for browser-renderable types
+
     const disposition = mimeType.startsWith('text/')
       || mimeType === 'application/json'
       || mimeType.startsWith('image/')
@@ -231,6 +230,40 @@ app.get('/pv/:token', async (req, res) => {
   } catch (err) {
     console.error('[Drive] 预览错误:', err.message);
     res.status(500).send('Preview failed: ' + err.message);
+  }
+});
+
+// Binary preview data endpoint (returns raw bytes, for client-side Office renderers)
+// Supports Google Workspace export (docx/xlsx) natively
+app.get('/api/preview-data/:fileId', requireLogin, async (req, res) => {
+  const { fileId } = req.params;
+  try {
+    const drive = getDriveClient();
+    const meta = await drive.files.get({
+      fileId,
+      fields: 'name,mimeType,size'
+    });
+    const { name, mimeType } = meta.data;
+
+    // Google Workspace native formats → export as docx/xlsx
+    const EXPORT_TYPES = {
+      'application/vnd.google-apps.document': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.google-apps.spreadsheet': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.google-apps.presentation': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    };
+    const exportMime = EXPORT_TYPES[mimeType];
+
+    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(name)}`);
+    res.setHeader('Content-Type', exportMime || mimeType);
+
+    const stream = exportMime
+      ? await drive.files.export({ fileId, mimeType: exportMime }, { responseType: 'stream' })
+      : await drive.files.get({ fileId, alt: 'media' }, { responseType: 'stream' });
+
+    stream.data.pipe(res);
+  } catch (err) {
+    console.error('[Drive] preview-data error:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
