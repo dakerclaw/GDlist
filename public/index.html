@@ -89,7 +89,7 @@
   .col-name { width: 55%; }
   .col-size { width: 12%; color: var(--text-muted); }
   .col-modified { width: 20%; color: var(--text-muted); }
-  .col-action { width: 13%; text-align: right; }
+  .col-action { width: 18%; text-align: right; white-space: nowrap; }
 
   .loading { text-align: center; padding: 40px; color: var(--text-muted); }
   .empty { text-align: center; padding: 40px; color: var(--text-muted); }
@@ -106,13 +106,39 @@
     width: 480px; max-width: 96vw;
   }
   .modal h3 { margin-bottom: 16px; font-size: 15px; }
-  .modal .share-url {
-    width: 100%; border: 1px solid var(--border); border-radius: 4px;
-    padding: 8px 10px; font-size: 13px; background: var(--bg);
-    word-break: break-all; outline: none;
-  }
   .modal .modal-footer { margin-top: 16px; display: flex; justify-content: flex-end; gap: 8px; }
-  .copy-hint { font-size: 12px; color: green; margin-top: 6px; min-height: 16px; }
+
+  /* preview modal */
+  #preview-modal {
+    align-items: flex-start;
+    padding-top: 40px;
+  }
+  #preview-modal .modal {
+    width: 900px; max-width: 96vw;
+    height: 80vh;
+    display: flex; flex-direction: column;
+    padding: 20px 24px 16px;
+  }
+  #preview-modal .modal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px; flex-shrink: 0;
+  }
+  #preview-modal .modal-header h3 { margin-bottom: 0; }
+  #preview-area {
+    flex: 1; min-height: 0; overflow: auto;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: #fff;
+  }
+  #preview-area img { display: block; max-width: 100%; margin: 0 auto; }
+  #preview-area pre {
+    padding: 16px; margin: 0; white-space: pre-wrap; word-break: break-all;
+    font-size: 13px; line-height: 1.6; overflow: auto; height: 100%;
+  }
+  #preview-area iframe { width: 100%; height: 100%; border: none; }
+  .no-preview {
+    display: flex; align-items: center; justify-content: center;
+    height: 100%; color: var(--text-muted); font-size: 14px;
+  }
 </style>
 </head>
 <body>
@@ -159,15 +185,15 @@
   </div>
 </div>
 
-<!-- ── Share Modal ── -->
-<div class="modal-backdrop" id="share-modal">
+<!-- ── Preview Modal ──-->
+<div class="modal-backdrop" id="preview-modal">
   <div class="modal">
-    <h3>分享链接（无需登录可下载）</h3>
-    <textarea class="share-url" id="share-url" rows="3" readonly></textarea>
-    <div class="copy-hint" id="copy-hint"></div>
-    <div class="modal-footer">
-      <button class="btn btn-outline btn-sm" onclick="copyLink()">复制</button>
-      <button class="btn btn-outline btn-sm" onclick="closeModal()">关闭</button>
+    <div class="modal-header">
+      <h3 id="preview-title">文件预览</h3>
+      <button class="btn btn-outline btn-sm" onclick="closePreview()">关闭</button>
+    </div>
+    <div id="preview-area">
+      <div class="no-preview">加载中…</div>
     </div>
   </div>
 </div>
@@ -266,7 +292,8 @@ async function loadFiles(folderId) {
       : `<span>${f.name}</span>`;
     const actionCell = isFolder
       ? ''
-      : `<button class="btn btn-outline btn-sm" onclick="getShareLink('${f.id}')">分享</button>`;
+      : `<button class="btn btn-outline btn-sm" onclick="doPreview('${f.id}', '${f.mimeType}')">预览</button>
+         <button class="btn btn-outline btn-sm" onclick="getShareLink('${f.id}')">分享</button>`;
     return `<tr>
       <td class="col-name">
         <div class="file-name">
@@ -297,29 +324,117 @@ async function loadBreadcrumb(folderId) {
 }
 
 // ── Share ─────────────────────────────────────────────────────────────────
+// 显示/隐藏 toast
+let shareToastTimer = null;
+function showShareToast(msg) {
+  let el = document.getElementById('share-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'share-toast';
+    el.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:8px 20px;border-radius:20px;font-size:14px;z-index:9999;transition:opacity .3s;pointer-events:none;';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.style.opacity = '1';
+  if (shareToastTimer) clearTimeout(shareToastTimer);
+  shareToastTimer = setTimeout(() => { el.style.opacity = '0'; }, 2000);
+}
+
 async function getShareLink(fileId) {
-  const r = await fetch('/api/share/' + fileId);
-  const d = await r.json();
-  document.getElementById('share-url').value = d.url;
-  document.getElementById('copy-hint').textContent = '';
-  document.getElementById('share-modal').classList.add('open');
-}
-
-function copyLink() {
-  const el = document.getElementById('share-url');
-  navigator.clipboard.writeText(el.value).then(() => {
-    document.getElementById('copy-hint').textContent = '已复制到剪贴板';
-  });
-}
-
-function closeModal() {
-  document.getElementById('share-modal').classList.remove('open');
+  try {
+    const r = await fetch('/api/share/' + fileId);
+    if (!r.ok) throw new Error('获取链接失败');
+    const d = await r.json();
+    await navigator.clipboard.writeText(d.url);
+    showShareToast('已复制到剪贴板 ✅');
+  } catch(e) {
+    showShareToast('复制失败，请手动复制');
+  }
 }
 
 // close modal on backdrop click
-document.getElementById('share-modal').addEventListener('click', function(e) {
-  if (e.target === this) closeModal();
+document.getElementById('preview-modal').addEventListener('click', function(e) {
+  if (e.target === this) closePreview();
 });
+
+// ── Preview ────────────────────────────────────────────────────────────────
+const TEXT_PREVIEW_MAX = 500 * 1024; // 500 KB
+
+async function doPreview(fileId, mimeType) {
+  const area = document.getElementById('preview-area');
+  area.innerHTML = '<div class="no-preview">加载中…</div>';
+  document.getElementById('preview-title').textContent = '文件预览';
+  document.getElementById('preview-modal').classList.add('open');
+
+  try {
+    const r = await fetch('/api/preview/' + fileId);
+    if (!r.ok) throw new Error((await r.json()).error);
+    const { url } = await r.json();
+
+    // Image — direct <img>
+    if (mimeType.startsWith('image/')) {
+      area.innerHTML = `<img src="${url}" alt="preview">`;
+    }
+    // Video / audio — native player
+    else if (mimeType.startsWith('video/')) {
+      area.innerHTML = `<video src="${url}" controls style="display:block;width:100%;height:100%">您的浏览器不支持视频播放</video>`;
+    } else if (mimeType.startsWith('audio/')) {
+      area.innerHTML = `<audio src="${url}" controls style="display:block;margin:40px auto">您的浏览器不支持音频播放</audio>`;
+    }
+    // PDF — inline iframe
+    else if (mimeType === 'application/pdf') {
+      area.innerHTML = `<iframe src="${url}" title="PDF preview"></iframe>`;
+    }
+    // Google Workspace files — Google Docs Viewer
+    else if (
+      mimeType.startsWith('application/vnd.google-apps') ||
+      mimeType.includes('openxmlformats') ||
+      mimeType.includes('officedocument') ||
+      mimeType.includes('msword') ||
+      mimeType.includes('excel') ||
+      mimeType.includes('powerpoint') ||
+      mimeType.includes('spreadsheet') ||
+      mimeType.includes('presentation')
+    ) {
+      const encoded = encodeURIComponent(url);
+      area.innerHTML = `<iframe src="https://docs.google.com/viewer?url=${encoded}&embedded=true" title="Document preview"></iframe>`;
+    }
+    // Plain text / JSON — fetch and display
+    else if (mimeType.startsWith('text/') || mimeType === 'application/json') {
+      const tr = await fetch(url);
+      if (!tr.ok) throw new Error('无法加载文件内容');
+      const size = parseInt(tr.headers.get('content-length') || '0');
+      if (size > TEXT_PREVIEW_MAX) {
+        area.innerHTML = `<div class="no-preview">文件过大（${(size/1024).toFixed(0)} KB），请使用下载链接查看</div>`;
+      } else {
+        const text = await tr.text();
+        const lang = mimeType === 'application/json' ? 'json'
+          : mimeType.includes('html') ? 'html'
+          : mimeType.includes('css') ? 'css'
+          : mimeType.includes('xml') ? 'xml' : 'plain';
+        area.innerHTML = `<pre class="language-${lang}">${escapeHtml(text)}</pre>`;
+      }
+    }
+    // Unsupported
+    else {
+      area.innerHTML = `<div class="no-preview">此文件类型暂不支持预览，请使用分享链接下载</div>`;
+    }
+  } catch(e) {
+    area.innerHTML = `<div class="no-preview">预览失败：${e.message}</div>`;
+  }
+}
+
+function closePreview() {
+  document.getElementById('preview-modal').classList.remove('open');
+}
+
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
 
 // enter key on login
 document.addEventListener('keydown', e => {
