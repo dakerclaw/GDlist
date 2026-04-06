@@ -84,7 +84,7 @@ gdlist/
 
 ## 彻底删除程序
 
-``
+--bash
 sudo systemctl stop gdlist 2>/dev/null || true
 sudo systemctl disable gdlist 2>/dev/null || true
 sudo rm -f /etc/systemd/system/gdlist.service
