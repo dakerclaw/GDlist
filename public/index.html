@@ -416,11 +416,10 @@ function renderFiles() {
     const safeMime = escapeHtml(f.mimeType);
     const nameCell = isFolder
       ? `<a onclick="loadFiles('${safeId}')">${escapedName}</a>`
-      : `<span>${escapedName}</span>`;
+      : `<a onclick="getShareLink('${safeId}');event.preventDefault();" style="cursor:pointer" title="点击复制分享链接">${escapedName}</a>`;
     const actionCell = isFolder
       ? ''
-      : `<button class="btn btn-outline btn-sm" onclick="doPreview('${safeId}', '${safeMime}')">预览</button>
-         <button class="btn btn-outline btn-sm" onclick="getShareLink('${safeId}')">分享</button>`;
+      : `<button class="btn btn-outline btn-sm" onclick="doPreview('${safeId}', '${safeMime}')">预览</button>`;
     return `<tr>
       <td class="col-name">
         <div class="file-name">
