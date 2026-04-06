@@ -11,7 +11,7 @@ Google Drive 文件列表服务，带登录保护，支持免密下载链接。
 
 ### 前置工作1：创建 Google Service Account
 
-1. 打开 https://console.cloud.google.com/，选择或创建项目
+1. 打开 https://console.cloud.google.com/ ，选择或创建项目
 2. 左侧菜单 → **IAM 和管理** → **Service Accounts**
 3. 点击「+ 创建 Service Account」→ 填写名称 → 完成
 4. 进入详情 → 「密钥」→「添加密钥」→「创建新密钥」→「JSON」→ 创建
