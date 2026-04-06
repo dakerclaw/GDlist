@@ -5,6 +5,7 @@ const express = require('express');
 const session = require('express-session');
 const cookieParser = require('cookie-parser');
 const bcrypt = require('bcryptjs');
+const rateLimit = require('express-rate-limit');
 const path = require('path');
 const { google } = require('googleapis');
 
@@ -12,6 +13,15 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 // Service Account 无法访问 'root'，需指定被共享的文件夹 ID
 const ROOT_FOLDER_ID = process.env.ROOT_FOLDER_ID || 'root';
+
+// ─── Security: Login Rate Limiter ────────────────────────────────────────────
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 分钟
+  max: 10,                   // 最多 10 次尝试
+  message: { error: '登录尝试过于频繁，请 15 分钟后再试' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // ─── Middleware ────────────────────────────────────────────────────────────
 app.use(express.json());
@@ -66,7 +76,7 @@ function getDriveClient() {
     ['https://www.googleapis.com/auth/drive']
   );
 
-  _drive = google.drive({ version: 'v3', auth });
+  _drive = google.drive({ version: 'v3', auth, timeout: 30 * 1000 }); // 30s 超时
   return _drive;
 }
 
@@ -78,8 +88,8 @@ function requireLogin(req, res, next) {
 
 // ─── Routes ───────────────────────────────────────────────────────────────
 
-// Login
-app.post('/api/login', async (req, res) => {
+// Login (with rate limiting)
+app.post('/api/login', loginLimiter, async (req, res) => {
   const { username, password } = req.body;
   const validUser = process.env.ADMIN_USERNAME || 'admin';
   const validHash = process.env.ADMIN_PASSWORD_HASH;
@@ -157,11 +167,10 @@ app.get('/api/path', requireLogin, async (req, res) => {
       chain.unshift({ id: meta.data.id, name: meta.data.name });
       current = meta.data.parents ? meta.data.parents[0] : null;
     }
-    // 把根节点名称也补进面包屑
+    // 把根节点名称也补进面包屑（复用已创建的 drive 实例）
     try {
-      const drive2 = getDriveClient();
       const rootName = ROOT_FOLDER_ID === 'root' ? 'My Drive'
-        : (await drive2.files.get({ fileId: ROOT_FOLDER_ID, fields: 'name' })).data.name;
+        : (await drive.files.get({ fileId: ROOT_FOLDER_ID, fields: 'name' })).data.name;
       chain.unshift({ id: ROOT_FOLDER_ID, name: rootName });
     } catch {
       chain.unshift({ id: ROOT_FOLDER_ID, name: 'My Drive' });
