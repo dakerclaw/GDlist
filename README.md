@@ -44,7 +44,7 @@ sudo bash install.sh
 3. 共享文件夹的ID
 4. 服务端口（默认 3000）
 
-
+---
 
 ## 安装后管理
 
@@ -83,7 +83,7 @@ gdlist/
 ---
 
 ## 彻底删除程序
-```bash
+
 sudo systemctl stop gdlist 2>/dev/null || true
 sudo systemctl disable gdlist 2>/dev/null || true
 sudo rm -f /etc/systemd/system/gdlist.service
@@ -92,7 +92,8 @@ sudo rm -rf /opt/gdlist
 echo "GDList 已彻底删除！"
 ---
 
-## 常见问题
+
+### 常见问题
 
 **Q: 显示"找不到文件"？**  
 A: Drive 文件夹没有共享给 Service Account 邮箱。请共享后再试。
