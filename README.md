@@ -15,8 +15,8 @@ Google Drive 文件列表服务，带登录保护，支持免密下载链接。
 2. 左侧菜单 → **IAM 和管理** → **Service Accounts**
 3. 点击「+ 创建 Service Account」→ 填写名称 → 完成
 4. 进入详情 → 「密钥」→「添加密钥」→「创建新密钥」→「JSON」→ 创建
-   - 浏览器自动下载 JSON 文件（勿改名）
-5. **将 JSON 文件的内容在需求时填入交互界面**
+   - 浏览器自动下载 JSON 文件
+5. **将 JSON 文件用文本文档打开，将其内容在需求时填入交互界面**
 6. **将你想让 GDList 访问的 Drive 文件夹共享给 Service Account 邮箱**
    - Drive 目标文件夹 → 右键 →「共享」→ 添加邮箱
    - 邮箱格式：`xxxxx@yyyyyy.iam.gserviceaccount.com`
