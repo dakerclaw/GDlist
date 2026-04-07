@@ -160,6 +160,9 @@
   }
   #preview-area iframe { width: 100%; height: 100%; border: none; }
   .no-preview {
+    display: flex; align-items: center; justify-content: center;
+    height: 100%; color: var(--text-muted); font-size: 14px;
+  }
 
   /* ── Responsive / Mobile ── */
   @media (max-width: 640px) {
@@ -182,10 +185,6 @@
   .results-info {
     font-size: 12px; color: var(--text-muted);
     margin-bottom: 8px; min-height: 18px;
-  }
-
-    display: flex; align-items: center; justify-content: center;
-    height: 100%; color: var(--text-muted); font-size: 14px;
   }
 </style>
 </head>
@@ -519,7 +518,12 @@ async function getShareLink(fileId) {
     if (!r.ok) throw new Error('获取链接失败');
     const d = await r.json();
 
-    // 兼容 HTTP 环境（clipboard API 需要安全上下文）
+    if (d.status === 'error') {
+      showShareToast(d.error || '缓存失败');
+      return;
+    }
+
+    // 复制链接
     const ta = document.createElement('textarea');
     ta.value = d.url;
     ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0;';
@@ -529,9 +533,13 @@ async function getShareLink(fileId) {
     const ok = document.execCommand('copy');
     document.body.removeChild(ta);
 
-    showShareToast(ok ? '已复制到剪贴板 ✅' : '复制失败，请手动复制');
+    if (ok) {
+      showShareToast(d.message || '已复制下载链接 ✅');
+    } else {
+      showShareToast('复制失败，请手动复制链接');
+    }
   } catch(e) {
-    showShareToast('复制失败，请手动复制');
+    showShareToast('获取链接失败');
   }
 }
 
