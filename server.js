@@ -325,7 +325,65 @@ app.get('/api/path', requireLogin, async (req, res) => {
   }
 });
 
-// Generate a download link (cached on server)
+// Generate a direct share link (no caching, streams from Drive)
+// GET /api/link/:fileId → { url, name }
+app.get('/api/link/:fileId', requireLogin, async (req, res) => {
+  const { fileId } = req.params;
+  try {
+    const drive = getDriveClient();
+    const meta = await drive.files.get({ fileId, fields: 'name,size' });
+    const token = Buffer.from(JSON.stringify({ id: fileId })).toString('base64url');
+    const host = `${req.protocol}://${req.get('host')}`;
+    res.json({
+      url: `${host}/dl/${token}`,
+      name: meta.data.name,
+      size: meta.data.size
+    });
+  } catch (err) {
+    console.error('[Link] 生成链接失败:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Cache file to server & return download link
+// GET /api/cache/:fileId → { status, url, name, size, message }
+// status: 'cached' | 'error'
+app.get('/api/cache/:fileId', requireLogin, async (req, res) => {
+  const { fileId } = req.params;
+  try {
+    const info = await cacheFile(fileId);
+    const token = Buffer.from(JSON.stringify({
+      fileId,
+      name: info.name,
+      cached: true
+    })).toString('base64url');
+    const host = `${req.protocol}://${req.get('host')}`;
+    res.json({
+      status: 'cached',
+      url: `${host}/cache/${token}`,
+      name: info.name,
+      size: info.size,
+      message: `缓存完成 (${(info.size / 1024 / 1024).toFixed(2)} MB)`
+    });
+  } catch (err) {
+    console.error('[Cache] 缓存失败:', err.message);
+    res.status(500).json({ status: 'error', error: '缓存失败: ' + err.message });
+  }
+});
+
+// Check cache status for a file
+// GET /api/cache-status/:fileId → { cached: bool, size?, cachedAt? }
+app.get('/api/cache-status/:fileId', requireLogin, (req, res) => {
+  const { fileId } = req.params;
+  if (cacheIndex.has(fileId)) {
+    const info = cacheIndex.get(fileId);
+    res.json({ cached: true, size: info.size, cachedAt: info.cachedAt });
+  } else {
+    res.json({ cached: false });
+  }
+});
+
+// Generate a download link (cached on server) — kept for compatibility
 // GET /api/share/:fileId → { status, url, message }
 // status: 'cached' | 'downloading' | 'error'
 app.get('/api/share/:fileId', requireLogin, async (req, res) => {
