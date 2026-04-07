@@ -7,12 +7,155 @@ const cookieParser = require('cookie-parser');
 const bcrypt = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
+const fs = require('fs');
 const { google } = require('googleapis');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 // Service Account 无法访问 'root'，需指定被共享的文件夹 ID
 const ROOT_FOLDER_ID = process.env.ROOT_FOLDER_ID || 'root';
+
+// ─── File Cache ────────────────────────────────────────────────────────────────
+const CACHE_DIR = path.join(__dirname, 'cache');
+const MAX_CACHE_SIZE = 5 * 1024 * 1024 * 1024; // 5 GB
+const CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 天
+
+// 确保缓存目录存在
+if (!fs.existsSync(CACHE_DIR)) {
+  fs.mkdirSync(CACHE_DIR, { recursive: true });
+}
+
+// 缓存索引：fileId -> { path, name, size, cachedAt }
+const cacheIndex = new Map();
+
+// 启动时加载已有缓存
+function loadCacheIndex() {
+  try {
+    const files = fs.readdirSync(CACHE_DIR);
+    for (const file of files) {
+      const filePath = path.join(CACHE_DIR, file);
+      const stat = fs.statSync(filePath);
+      // 格式: fileId_name_encoded
+      const parts = file.split('_', 2);
+      if (parts.length >= 2) {
+        const fileId = parts[0];
+        cacheIndex.set(fileId, {
+          path: filePath,
+          name: decodeURIComponent(parts.slice(1).join('_')),
+          size: stat.size,
+          cachedAt: stat.mtime.getTime()
+        });
+      }
+    }
+    console.log(`[Cache] 已加载 ${cacheIndex.size} 个缓存文件`);
+  } catch (e) {
+    console.error('[Cache] 加载缓存失败:', e.message);
+  }
+}
+
+// 清理过期/超限缓存
+function cleanCache() {
+  try {
+    const now = Date.now();
+    let totalSize = 0;
+    const toDelete = [];
+
+    // 计算大小并找出过期文件
+    for (const [fileId, info] of cacheIndex) {
+      totalSize += info.size;
+      if (now - info.cachedAt > CACHE_TTL) {
+        toDelete.push(fileId);
+      }
+    }
+
+    // 删除过期文件
+    for (const fileId of toDelete) {
+      const info = cacheIndex.get(fileId);
+      if (fs.existsSync(info.path)) {
+        fs.unlinkSync(info.path);
+      }
+      cacheIndex.delete(fileId);
+      console.log(`[Cache] 删除过期文件: ${info.name}`);
+    }
+
+    // 如果超限，删除最旧的文件
+    while (totalSize > MAX_CACHE_SIZE && cacheIndex.size > 0) {
+      let oldest = null;
+      let oldestTime = Infinity;
+      for (const [fileId, info] of cacheIndex) {
+        if (info.cachedAt < oldestTime) {
+          oldestTime = info.cachedAt;
+          oldest = fileId;
+        }
+      }
+      if (oldest) {
+        const info = cacheIndex.get(oldest);
+        totalSize -= info.size;
+        if (fs.existsSync(info.path)) {
+          fs.unlinkSync(info.path);
+        }
+        cacheIndex.delete(oldest);
+        console.log(`[Cache] 清理空间，删除: ${info.name}`);
+      }
+    }
+  } catch (e) {
+    console.error('[Cache] 清理失败:', e.message);
+  }
+}
+
+// 下载文件到缓存
+async function cacheFile(fileId) {
+  if (cacheIndex.has(fileId)) {
+    return cacheIndex.get(fileId); // 已缓存
+  }
+
+  const drive = getDriveClient();
+  const meta = await drive.files.get({
+    fileId,
+    fields: 'name,mimeType,size'
+  });
+
+  const { name, mimeType } = meta.data;
+  const safeName = name.replace(/[<>:"/\\|?*]/g, '_');
+  const cachedFileName = `${fileId}_${encodeURIComponent(safeName)}`;
+  const cachedPath = path.join(CACHE_DIR, cachedFileName);
+
+  console.log(`[Cache] 下载中: ${name}`);
+
+  const response = await drive.files.get(
+    { fileId, alt: 'media' },
+    { responseType: 'stream' }
+  );
+
+  return new Promise((resolve, reject) => {
+    const writeStream = fs.createWriteStream(cachedPath);
+    let size = 0;
+
+    response.data.on('data', (chunk) => {
+      size += chunk.length;
+    });
+
+    response.data.pipe(writeStream);
+    writeStream.on('finish', () => {
+      const info = {
+        path: cachedPath,
+        name,
+        mimeType,
+        size,
+        cachedAt: Date.now()
+      };
+      cacheIndex.set(fileId, info);
+      console.log(`[Cache] 完成: ${name} (${(size / 1024 / 1024).toFixed(2)} MB)`);
+      resolve(info);
+    });
+    writeStream.on('error', reject);
+    response.data.on('error', reject);
+  });
+}
+
+// 定期清理（每小时）
+setInterval(cleanCache, 60 * 60 * 1000);
+loadCacheIndex();
 
 // ─── Security: Login Rate Limiter ────────────────────────────────────────────
 const loginLimiter = rateLimit({
@@ -182,16 +325,78 @@ app.get('/api/path', requireLogin, async (req, res) => {
   }
 });
 
-// Generate a public (token-signed) download link
-// The link embeds a signed token so no login is required to download
-app.get('/api/share/:fileId', requireLogin, (req, res) => {
+// Generate a download link (cached on server)
+// GET /api/share/:fileId → { status, url, message }
+// status: 'cached' | 'downloading' | 'error'
+app.get('/api/share/:fileId', requireLogin, async (req, res) => {
   const { fileId } = req.params;
-  const token = Buffer.from(JSON.stringify({
-    id: fileId
-    // no expiry — links are permanent
-  })).toString('base64url');
-  const host = `${req.protocol}://${req.get('host')}`;
-  res.json({ url: `${host}/dl/${token}` });
+
+  // 已缓存 → 直接返回链接
+  if (cacheIndex.has(fileId)) {
+    const info = cacheIndex.get(fileId);
+    const token = Buffer.from(JSON.stringify({
+      fileId,
+      name: info.name,
+      cached: true
+    })).toString('base64url');
+    const host = `${req.protocol}://${req.get('host')}`;
+    return res.json({
+      status: 'cached',
+      url: `${host}/cache/${token}`,
+      name: info.name,
+      size: info.size,
+      message: '文件已在缓存中，可直接下载'
+    });
+  }
+
+  // 正在缓存（通过缓存文件名判断是否正在下载）
+  // 这里简化处理：直接开始缓存
+  try {
+    const info = await cacheFile(fileId);
+    const token = Buffer.from(JSON.stringify({
+      fileId,
+      name: info.name,
+      cached: true
+    })).toString('base64url');
+    const host = `${req.protocol}://${req.get('host')}`;
+    res.json({
+      status: 'cached',
+      url: `${host}/cache/${token}`,
+      name: info.name,
+      size: info.size,
+      message: `文件已缓存 (${(info.size / 1024 / 1024).toFixed(2)} MB)`
+    });
+  } catch (err) {
+    console.error('[Cache] 缓存失败:', err.message);
+    res.status(500).json({
+      status: 'error',
+      error: '文件缓存失败: ' + err.message
+    });
+  }
+});
+
+// Serve cached file
+app.get('/cache/:token', async (req, res) => {
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(req.params.token, 'base64url').toString());
+  } catch {
+    return res.status(400).send('Invalid token');
+  }
+
+  const { fileId, name } = payload;
+
+  if (!cacheIndex.has(fileId)) {
+    return res.status(404).send('File not in cache');
+  }
+
+  const info = cacheIndex.get(fileId);
+
+  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(info.name)}`);
+  res.setHeader('Content-Type', info.mimeType || 'application/octet-stream');
+  res.setHeader('Content-Length', info.size);
+
+  res.sendFile(info.path);
 });
 
 // Generate a signed preview token (login required)
