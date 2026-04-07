@@ -17,39 +17,41 @@ const ROOT_FOLDER_ID = process.env.ROOT_FOLDER_ID || 'root';
 
 // ─── File Cache ────────────────────────────────────────────────────────────────
 const CACHE_DIR = path.join(__dirname, 'cache');
+const CACHE_META_FILE = path.join(CACHE_DIR, 'meta.json');
 const MAX_CACHE_SIZE = 5 * 1024 * 1024 * 1024; // 5 GB
-const CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 天
+const CACHE_TTL = 100 * 24 * 60 * 60 * 1000; // 100 天
 
 // 确保缓存目录存在
 if (!fs.existsSync(CACHE_DIR)) {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
 }
 
-// 缓存索引：fileId -> { path, name, size, cachedAt }
+// 缓存索引：fileId -> { path, name, size, mimeType, cachedAt }
 const cacheIndex = new Map();
 
-// 启动时加载已有缓存
+// 加载/保存缓存元数据（持久化到 cache/meta.json，不再依赖 mtime）
 function loadCacheIndex() {
   try {
-    const files = fs.readdirSync(CACHE_DIR);
-    for (const file of files) {
-      const filePath = path.join(CACHE_DIR, file);
-      const stat = fs.statSync(filePath);
-      // 格式: fileId_name_encoded
-      const parts = file.split('_', 2);
-      if (parts.length >= 2) {
-        const fileId = parts[0];
-        cacheIndex.set(fileId, {
-          path: filePath,
-          name: decodeURIComponent(parts.slice(1).join('_')),
-          size: stat.size,
-          cachedAt: stat.mtime.getTime()
-        });
+    if (fs.existsSync(CACHE_META_FILE)) {
+      const meta = JSON.parse(fs.readFileSync(CACHE_META_FILE, 'utf8'));
+      for (const [fileId, info] of Object.entries(meta)) {
+        if (fs.existsSync(info.path)) {
+          cacheIndex.set(fileId, info);
+        }
       }
     }
     console.log(`[Cache] 已加载 ${cacheIndex.size} 个缓存文件`);
   } catch (e) {
-    console.error('[Cache] 加载缓存失败:', e.message);
+    console.error('[Cache] 加载元数据失败:', e.message);
+  }
+}
+
+function saveCacheIndex() {
+  try {
+    const obj = Object.fromEntries(cacheIndex);
+    fs.writeFileSync(CACHE_META_FILE, JSON.stringify(obj, null, 2));
+  } catch (e) {
+    console.error('[Cache] 保存元数据失败:', e.message);
   }
 }
 
@@ -77,6 +79,7 @@ function cleanCache() {
       cacheIndex.delete(fileId);
       console.log(`[Cache] 删除过期文件: ${info.name}`);
     }
+    saveCacheIndex(); // 过期清理后保存
 
     // 如果超限，删除最旧的文件
     while (totalSize > MAX_CACHE_SIZE && cacheIndex.size > 0) {
@@ -98,6 +101,7 @@ function cleanCache() {
         console.log(`[Cache] 清理空间，删除: ${info.name}`);
       }
     }
+    saveCacheIndex(); // LRU 淘汰后也保存
   } catch (e) {
     console.error('[Cache] 清理失败:', e.message);
   }
@@ -145,6 +149,7 @@ async function cacheFile(fileId) {
         cachedAt: Date.now()
       };
       cacheIndex.set(fileId, info);
+      saveCacheIndex(); // 持久化缓存元数据
       console.log(`[Cache] 完成: ${name} (${(size / 1024 / 1024).toFixed(2)} MB)`);
       resolve(info);
     });
