@@ -444,17 +444,35 @@ app.get('/cache/:token', async (req, res) => {
 
   const { fileId, name } = payload;
 
-  if (!cacheIndex.has(fileId)) {
-    return res.status(404).send('File not in cache');
+  // 缓存命中 → 直接从本地提供文件
+  if (cacheIndex.has(fileId)) {
+    const info = cacheIndex.get(fileId);
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(info.name)}`);
+    res.setHeader('Content-Type', info.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Length', info.size);
+    return res.sendFile(info.path);
   }
 
-  const info = cacheIndex.get(fileId);
+  // 缓存已过期/被清理 → 自动回退到直连 Drive 下载
+  console.log(`[Cache] 缓存已失效，回退直链: ${fileId}`);
+  try {
+    const drive = getDriveClient();
+    const meta = await drive.files.get({ fileId, fields: 'name,mimeType,size' });
+    const { name: fileName, mimeType, size } = meta.data;
 
-  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(info.name)}`);
-  res.setHeader('Content-Type', info.mimeType || 'application/octet-stream');
-  res.setHeader('Content-Length', info.size);
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+    res.setHeader('Content-Type', mimeType || 'application/octet-stream');
+    if (size) res.setHeader('Content-Length', size);
 
-  res.sendFile(info.path);
+    const dlRes = await drive.files.get(
+      { fileId, alt: 'media' },
+      { responseType: 'stream' }
+    );
+    dlRes.data.pipe(res);
+  } catch (err) {
+    console.error('[Cache] 回退直链失败:', err.message);
+    if (!res.headersSent) res.status(502).send('文件下载失败，请重新获取链接');
+  }
 });
 
 // Generate a signed preview token (login required)
