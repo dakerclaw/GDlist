@@ -65,7 +65,7 @@ bash /opt/gdlist/install.sh    # 重新配置
 
 ## 📦 更新指南
 
-### 自动更新（推荐）
+### 自动更新
 
 ```bash
 cd /opt/gdlist
@@ -74,26 +74,6 @@ git reset --hard origin/main
 npm install --omit=dev
 systemctl restart gdlist
 ```
-
-### 手动更新
-
-如果服务器上 git 没有配置用户，或网络无法访问 GitHub：
-
-1. 在本地修改代码
-2. 手动上传 `server.js`、`public/index.html`、`package.json`、`install.sh` 等文件到服务器 `/opt/gdlist/`
-3. 执行 `npm install --omit=dev && systemctl restart gdlist`
-
-### 更新后必做
-
-1. 查看日志确认启动成功：`journalctl -u gdlist -n 10 --no-pager`
-2. 浏览器强制刷新（Ctrl+Shift+R）确保加载最新前端
-3. 测试文件列表、下载、PDF 预览是否正常
-
-### 版本号说明
-
-前端版本号由 `server.js` 和 `public/index.html` 顶部的 `APP_VERSION` 控制，两者必须一致。更新代码时同步修改，例如从 `20260414` 改为 `20260415`。版本号变化会强制浏览器刷新 CDN 资源（PDF.js 等）。
-
----
 
 ## 🗑️ 卸载指南
 
@@ -115,7 +95,7 @@ systemctl daemon-reload
 rm -rf /opt/gdlist
 ```
 
-> ⚠️ 这会删除所有缓存文件（`cache/` 和 `preview-cache/`），如果缓存中有重要数据请提前备份。
+> ⚠️ 这会删除所有缓存文件，如果缓存中有重要数据请提前备份。
 
 ### 步骤三：确认清理完毕
 
