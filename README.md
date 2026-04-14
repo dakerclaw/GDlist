@@ -70,9 +70,7 @@ bash /opt/gdlist/install.sh    # 重新配置
 ```bash
 cd /opt/gdlist
 git fetch origin
-git reset --hard origin/main    # 如果默认分支是 main
-# 或
-git reset --hard origin/master  # 如果默认分支是 master
+git reset --hard origin/main
 npm install --omit=dev
 systemctl restart gdlist
 ```
