@@ -347,9 +347,6 @@ app.get('/pv2/:token', async (req, res) => {
 loadPreviewCacheIndex();
 setInterval(cleanPreviewCache, 60 * 60 * 1000);
 
-// ─── Download Cache ───────────────────────────────────────────────────────────
-async function cacheFile(fileId) {
-
 // ─── Security: Login Rate Limiter ────────────────────────────────────────────
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 分钟
@@ -692,7 +689,20 @@ app.get('/api/preview/:fileId', requireLogin, (req, res) => {
   const { fileId } = req.params;
   const token = Buffer.from(JSON.stringify({ id: fileId })).toString('base64url');
   const host = `${req.protocol}://${req.get('host')}`;
-  res.json({ token, url: `${host}/pv/${token}` });
+  // 异步获取文件信息（用于前端 PDF.js 显示文件名和大小）
+  getDriveClient().files.get({ fileId, fields: 'name,size' })
+    .then(({ data }) => {
+      res.json({
+        token,
+        url: `${host}/pv/${token}`,
+        name: data.name,
+        size: data.size || 0
+      });
+    })
+    .catch(() => {
+      // 文件信息获取失败时仍返回 token
+      res.json({ token, url: `${host}/pv/${token}`, name: '', size: 0 });
+    });
 });
 
 // Public inline preview endpoint (serves raw file, no conversion)
