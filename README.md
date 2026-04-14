@@ -22,12 +22,11 @@
 
 > ⚠️ **必须执行第 3 步！** Service Account 本身无权访问 Drive，必须共享文件夹才有权限。
 
-### 第二步：安装服务（VPS）
+### 第二步：安装服务
 
 ```bash
-# 下载并运行安装脚本（支持 Ubuntu/Debian/CentOS/Rocky Linux）
 curl -fsSL https://raw.githubusercontent.com/dakerclaw/GDlist/main/install.sh -o install.sh
-sudo bash install.sh
+bash install.sh
 ```
 
 安装过程全交互式，会依次询问：
@@ -39,7 +38,7 @@ sudo bash install.sh
 ### 第三步：访问使用
 
 ```
-http://你的服务器IP:3000
+http://你的服务器IP:端口
 ```
 
 ---
@@ -49,7 +48,7 @@ http://你的服务器IP:3000
 - [ ] 已下载 Service Account JSON 密钥文件
 - [ ] 已将 Drive 文件夹共享给 Service Account 邮箱
 - [ ] 准备好要分享的 Drive 文件夹 ID（URL 中 `/folders/` 后面的字符串）
-- [ ] VPS 系统为 Ubuntu/Debian/CentOS/Rocky Linux
+- [ ] 服务器系统为 Ubuntu/Debian/CentOS/Rocky Linux
 
 ---
 
@@ -57,9 +56,80 @@ http://你的服务器IP:3000
 
 ```bash
 systemctl status gdlist        # 查看运行状态
-journalctl -u gdlist -f        # 实时查看日志
+journalctl -u gdlist -f         # 实时查看日志
 systemctl restart gdlist       # 重启服务
 bash /opt/gdlist/install.sh    # 重新配置
+```
+
+---
+
+## 📦 更新指南
+
+### 自动更新（推荐）
+
+```bash
+cd /opt/gdlist
+git fetch origin
+git reset --hard origin/main    # 如果默认分支是 main
+# 或
+git reset --hard origin/master  # 如果默认分支是 master
+npm install --omit=dev
+systemctl restart gdlist
+```
+
+### 手动更新
+
+如果服务器上 git 没有配置用户，或网络无法访问 GitHub：
+
+1. 在本地修改代码
+2. 手动上传 `server.js`、`public/index.html`、`package.json`、`install.sh` 等文件到服务器 `/opt/gdlist/`
+3. 执行 `npm install --omit=dev && systemctl restart gdlist`
+
+### 更新后必做
+
+1. 查看日志确认启动成功：`journalctl -u gdlist -n 10 --no-pager`
+2. 浏览器强制刷新（Ctrl+Shift+R）确保加载最新前端
+3. 测试文件列表、下载、PDF 预览是否正常
+
+### 版本号说明
+
+前端版本号由 `server.js` 和 `public/index.html` 顶部的 `APP_VERSION` 控制，两者必须一致。更新代码时同步修改，例如从 `20260414` 改为 `20260415`。版本号变化会强制浏览器刷新 CDN 资源（PDF.js 等）。
+
+---
+
+## 🗑️ 卸载指南
+
+### 步骤一：停止服务
+
+```bash
+systemctl stop gdlist
+systemctl disable gdlist
+```
+
+### 步骤二：删除服务与文件
+
+```bash
+# 删除 systemd 服务文件
+rm /etc/systemd/system/gdlist.service
+systemctl daemon-reload
+
+# 删除项目文件（包括所有缓存）
+rm -rf /opt/gdlist
+```
+
+> ⚠️ 这会删除所有缓存文件（`cache/` 和 `preview-cache/`），如果缓存中有重要数据请提前备份。
+
+### 步骤三：确认清理完毕
+
+```bash
+# 检查进程是否已停止
+ps aux | grep gdlist
+
+# 检查端口是否已释放
+ss -tlnp | grep 3000
+
+# 检查文件是否已删除
+ls /opt/gdlist
 ```
 
 ---
@@ -91,14 +161,14 @@ gdlist/
 
 ## ❓ 常见问题
 
-**Q: 显示"找不到文件"？**  
+**Q: 显示"找不到文件"？**
 A: Drive 文件夹没有共享给 Service Account 邮箱。请执行上述「第一步：准备 Google Cloud」的第 3 步。
 
-**Q: 想更换密码？**  
+**Q: 想更换密码？**
 A: 重新运行 `bash /opt/gdlist/install.sh`。
 
-**Q: 下载链接过期了？**  
+**Q: 下载链接过期了？**
 A: 重新登录后点击文件即可生成新链接。
 
-**Q: 如何获取文件夹 ID？**  
+**Q: 如何获取文件夹 ID？**
 A: 打开目标 Drive 文件夹，复制 URL 中 `/folders/` 后面的字符串（问号前）。

@@ -11,6 +11,7 @@ const fs = require('fs');
 const { google } = require('googleapis');
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 // Service Account 无法访问 'root'，需指定被共享的文件夹 ID
 const ROOT_FOLDER_ID = process.env.ROOT_FOLDER_ID || 'root';
@@ -161,129 +162,8 @@ async function cacheFile(fileId) {
   });
 }
 
-// ─── Preview Cache (PDF/图片预览加速) ───────────────────────────────────────
-const PREVIEW_DIR = path.join(__dirname, 'preview-cache');
-const PREVIEW_META_FILE = path.join(PREVIEW_DIR, 'meta.json');
-// 预览缓存有效期 7 天，超出则重新从 Drive 拉取（保证文件最新）
-const PREVIEW_TTL = 7 * 24 * 60 * 60 * 1000;
-
-if (!fs.existsSync(PREVIEW_DIR)) {
-  fs.mkdirSync(PREVIEW_DIR, { recursive: true });
-}
-
-// 预览缓存索引：fileId -> { path, name, mimeType, size, cachedAt }
-const previewIndex = new Map();
-
-function loadPreviewCacheIndex() {
-  try {
-    if (fs.existsSync(PREVIEW_META_FILE)) {
-      const meta = JSON.parse(fs.readFileSync(PREVIEW_META_FILE, 'utf8'));
-      for (const [fileId, info] of Object.entries(meta)) {
-        if (fs.existsSync(info.path)) {
-          previewIndex.set(fileId, info);
-        }
-      }
-    }
-    console.log(`[Preview] 已加载 ${previewIndex.size} 个预览缓存`);
-  } catch (e) {
-    console.error('[Preview] 加载元数据失败:', e.message);
-  }
-}
-
-function savePreviewCacheIndex() {
-  try {
-    const obj = Object.fromEntries(previewIndex);
-    fs.writeFileSync(PREVIEW_META_FILE, JSON.stringify(obj, null, 2));
-  } catch (e) {
-    console.error('[Preview] 保存元数据失败:', e.message);
-  }
-}
-
-// 清理过期预览缓存
-function cleanPreviewCache() {
-  const now = Date.now();
-  const toDelete = [];
-  for (const [fileId, info] of previewIndex) {
-    if (now - info.cachedAt > PREVIEW_TTL) {
-      toDelete.push(fileId);
-    }
-  }
-  for (const fileId of toDelete) {
-    const info = previewIndex.get(fileId);
-    if (fs.existsSync(info.path)) fs.unlinkSync(info.path);
-    previewIndex.delete(fileId);
-    console.log(`[Preview] 删除过期: ${info.name}`);
-  }
-  if (toDelete.length) savePreviewCacheIndex();
-}
-
-// 将文件缓存用于预览（已缓存则直接返回，未缓存则下载）
-// 返回 { path, name, mimeType, size }
-async function getPreviewFile(fileId) {
-  // 已缓存且未过期
-  if (previewIndex.has(fileId)) {
-    const info = previewIndex.get(fileId);
-    if (Date.now() - info.cachedAt <= PREVIEW_TTL) {
-      return info;
-    }
-    // 过期，删除旧文件重新下载
-    if (fs.existsSync(info.path)) fs.unlinkSync(info.path);
-    previewIndex.delete(fileId);
-  }
-
-  const drive = getDriveClient();
-  const meta = await drive.files.get({ fileId, fields: 'name,mimeType,size' });
-  const { name, mimeType, size } = meta.data;
-  const safeName = name.replace(/[<>:"/\\|?*]/g, '_');
-  const cachedFileName = `${fileId}_${encodeURIComponent(safeName)}`;
-  const cachedPath = path.join(PREVIEW_DIR, cachedFileName);
-
-  console.log(`[Preview] 下载中: ${name}`);
-
-  const response = await drive.files.get(
-    { fileId, alt: 'media' },
-    { responseType: 'stream' }
-  );
-
-  return new Promise((resolve, reject) => {
-    const writeStream = fs.createWriteStream(cachedPath);
-    let downloadedSize = 0;
-    response.data.on('data', (chunk) => { downloadedSize += chunk.length; });
-    response.data.pipe(writeStream);
-    writeStream.on('finish', () => {
-      const info = { path: cachedPath, name, mimeType, size: downloadedSize, cachedAt: Date.now() };
-      previewIndex.set(fileId, info);
-      savePreviewCacheIndex();
-      console.log(`[Preview] 完成: ${name} (${(downloadedSize / 1024 / 1024).toFixed(2)} MB)`);
-      resolve(info);
-    });
-    writeStream.on('error', reject);
-    response.data.on('error', reject);
-  });
-}
-
-// GET /api/preview-cache/:fileId
-// 下载预览文件到本地，返回本地 URL（需要登录）
-app.get('/api/preview-cache/:fileId', requireLogin, async (req, res) => {
-  const { fileId } = req.params;
-  try {
-    const info = await getPreviewFile(fileId);
-    const token = Buffer.from(JSON.stringify({ id: fileId })).toString('base64url');
-    const host = `${req.protocol}://${req.get('host')}`;
-    res.json({
-      url: `${host}/pv2/${token}`,
-      name: info.name,
-      mimeType: info.mimeType,
-      size: info.size
-    });
-  } catch (err) {
-    console.error('[Preview] 预览缓存失败:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET /pv2/:token
-// 提供 PDF/图片预览：优先本地缓存，未缓存则直连 Drive 流式下载（PDF.js 边下边渲染）
+// ─── Preview Stream (直接流式，不缓存) ────────────────────────────────────
+// /pv2/:token 直接从 Google Drive 流式下载，PDF.js 边下边渲染
 // 支持 Range 请求（PDF.js 分片加载必需）
 app.get('/pv2/:token', async (req, res) => {
   let payload;
@@ -295,15 +175,6 @@ app.get('/pv2/:token', async (req, res) => {
 
   const { id: fileId } = payload;
 
-  // 优先从本地预览缓存提供
-  if (previewIndex.has(fileId)) {
-    const info = previewIndex.get(fileId);
-    res.setHeader('Content-Type', info.mimeType || 'application/pdf');
-    res.setHeader('Accept-Ranges', 'bytes');
-    return res.sendFile(info.path);
-  }
-
-  // 未缓存 → 直连 Google Drive 流式下载（支持 Range）
   try {
     const drive = getDriveClient();
     const meta = await drive.files.get({ fileId, fields: 'name,mimeType,size' });
@@ -313,7 +184,6 @@ app.get('/pv2/:token', async (req, res) => {
     res.setHeader('Accept-Ranges', 'bytes');
     res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(name)}`);
 
-    // PDF.js 会发 Range 请求，只拉需要的部分（减少等待时间）
     const range = req.headers['range'];
     if (range) {
       const parts = range.replace(/bytes=/, '').split('-');
@@ -331,7 +201,6 @@ app.get('/pv2/:token', async (req, res) => {
       );
       dlRes.data.pipe(res);
     } else {
-      // 无 Range → 全量流式（PDF.js 首次加载会走这里）
       const dlRes = await drive.files.get(
         { fileId, alt: 'media' },
         { responseType: 'stream' }
@@ -343,9 +212,6 @@ app.get('/pv2/:token', async (req, res) => {
     if (!res.headersSent) res.status(500).json({ error: err.message });
   }
 });
-
-loadPreviewCacheIndex();
-setInterval(cleanPreviewCache, 60 * 60 * 1000);
 
 // ─── Security: Login Rate Limiter ────────────────────────────────────────────
 const loginLimiter = rateLimit({
@@ -694,14 +560,13 @@ app.get('/api/preview/:fileId', requireLogin, (req, res) => {
     .then(({ data }) => {
       res.json({
         token,
-        url: `${host}/pv/${token}`,
+        url: `${host}/pv2/${token}`,
         name: data.name,
         size: data.size || 0
       });
     })
     .catch(() => {
-      // 文件信息获取失败时仍返回 token
-      res.json({ token, url: `${host}/pv/${token}`, name: '', size: 0 });
+      res.json({ token, url: `${host}/pv2/${token}`, name: '', size: 0 });
     });
 });
 

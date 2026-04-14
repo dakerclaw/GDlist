@@ -16,10 +16,10 @@ prompt()  { echo -ne "${BOLD}$*${NC} "; }
 if [ ! -t 0 ]; then
   echo -e "${RED}[错误]${NC} 需要交互式终端，请先下载再运行："
   echo "  curl -fsSL https://raw.githubusercontent.com/dakerclaw/GDlist/main/install.sh -o install.sh"
-  echo "  sudo bash install.sh"
+  echo "  bash install.sh"
   exit 1
 fi
-[[ $EUID -ne 0 ]] && error "请用 root 权限运行：sudo bash install.sh"
+[[ $EUID -ne 0 ]] && error "请用 root 权限运行：bash install.sh"
 
 echo ""
 echo -e "${CYAN}${BOLD}╔════════════════════════════════════════╗${NC}"
