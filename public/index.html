@@ -5,8 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>GDList</title>
 <!-- ── PDF.js ─────────────────────────────────────────────────────────────────── -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-<script>pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
+<script>
+  // 前端版本号：修改后浏览器自动加载最新资源（绕过缓存）
+  var APP_VERSION = '20260414';
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js?v=20260414"></script>
+<script>pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js?v=20260414';</script>
 
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -759,12 +763,14 @@ async function doPreview(fileId, mimeType) {
       } else if (mimeType.startsWith('audio/')) {
         area.innerHTML = `<audio src="${url}" controls style="display:block;margin:40px auto">您的浏览器不支持音频播放</audio>`;
       } else {
-        // PDF — 使用本地缓存 + PDF.js 边下边渲染
+        // PDF — /pv2/ 后端自动：优先缓存，未缓存则直连 Drive 流式（PDF.js 边下边渲染）
         area.innerHTML = '<div class="no-preview" id="pdf-status">⏳ 正在准备预览…</div>';
-        const r = await fetch('/api/preview-cache/' + fileId);
+        const r = await fetch('/api/preview/' + fileId);
         if (!r.ok) throw new Error((await r.json()).error);
-        const data = await r.json();
-        renderPdfViewer(area, data.url, data.name, data.size);
+        const { url } = await r.json();
+        // /api/preview 返回的 url 指向 /pv/，需要改为 /pv2/（流式支持 Range）
+        const pv2Url = url.replace('/pv/', '/pv2/');
+        renderPdfViewer(area, pv2Url, '', 0);
         return;
       }
       return;
