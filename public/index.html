@@ -764,12 +764,9 @@ async function doPreview(fileId, mimeType) {
         area.innerHTML = `<audio src="${url}" controls style="display:block;margin:40px auto">您的浏览器不支持音频播放</audio>`;
       } else {
         // PDF — /pv2/ 后端自动：优先缓存，未缓存则直连 Drive 流式（PDF.js 边下边渲染）
-        area.innerHTML = '<div class="no-preview" id="pdf-status">⏳ 正在准备预览…</div>';
-        const r = await fetch('/api/preview/' + fileId);
-        if (!r.ok) throw new Error((await r.json()).error);
-        const { url } = await r.json();
-        // /api/preview 返回的 url 指向 /pv/，需要改为 /pv2/（流式支持 Range）
+        // 注意：url 来自 line 756 的第一次 fetch，复用它避免重复请求
         const pv2Url = url.replace('/pv/', '/pv2/');
+        area.innerHTML = '<div class="no-preview" id="pdf-status">⏳ 正在准备预览…</div>';
         renderPdfViewer(area, pv2Url, '', 0);
         return;
       }
