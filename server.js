@@ -15,6 +15,9 @@ const PORT = process.env.PORT || 3000;
 // Service Account 无法访问 'root'，需指定被共享的文件夹 ID
 const ROOT_FOLDER_ID = process.env.ROOT_FOLDER_ID || 'root';
 
+// ─── App Version (Cache Busting) ─────────────────────────────────────────────
+const APP_VERSION = '20260414';
+
 // ─── File Cache ────────────────────────────────────────────────────────────────
 const CACHE_DIR = path.join(__dirname, 'cache');
 const CACHE_META_FILE = path.join(CACHE_DIR, 'meta.json');
@@ -280,22 +283,65 @@ app.get('/api/preview-cache/:fileId', requireLogin, async (req, res) => {
 });
 
 // GET /pv2/:token
-// 提供预览缓存文件的访问（支持 Range 请求，PDF.js 分片加载需要）
+// 提供 PDF/图片预览：优先本地缓存，未缓存则直连 Drive 流式下载（PDF.js 边下边渲染）
+// 支持 Range 请求（PDF.js 分片加载必需）
 app.get('/pv2/:token', async (req, res) => {
   let payload;
   try {
     payload = JSON.parse(Buffer.from(req.params.token, 'base64url').toString());
   } catch {
-    return res.status(400).send('Invalid token');
+    return res.status(400).json({ error: 'Invalid token' });
   }
+
   const { id: fileId } = payload;
-  if (!previewIndex.has(fileId)) {
-    return res.status(404).send('Preview not cached');
+
+  // 优先从本地预览缓存提供
+  if (previewIndex.has(fileId)) {
+    const info = previewIndex.get(fileId);
+    res.setHeader('Content-Type', info.mimeType || 'application/pdf');
+    res.setHeader('Accept-Ranges', 'bytes');
+    return res.sendFile(info.path);
   }
-  const info = previewIndex.get(fileId);
-  res.setHeader('Content-Type', info.mimeType || 'application/pdf');
-  res.setHeader('Accept-Ranges', 'bytes');
-  res.sendFile(info.path);
+
+  // 未缓存 → 直连 Google Drive 流式下载（支持 Range）
+  try {
+    const drive = getDriveClient();
+    const meta = await drive.files.get({ fileId, fields: 'name,mimeType,size' });
+    const { name, mimeType, size } = meta.data;
+
+    res.setHeader('Content-Type', mimeType || 'application/pdf');
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(name)}`);
+
+    // PDF.js 会发 Range 请求，只拉需要的部分（减少等待时间）
+    const range = req.headers['range'];
+    if (range) {
+      const parts = range.replace(/bytes=/, '').split('-');
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : size - 1;
+      const chunkSize = end - start + 1;
+
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
+      res.setHeader('Content-Length', chunkSize);
+      res.status(206);
+
+      const dlRes = await drive.files.get(
+        { fileId, alt: 'media' },
+        { responseType: 'stream', headers: { Range: `bytes=${start}-${end}` } }
+      );
+      dlRes.data.pipe(res);
+    } else {
+      // 无 Range → 全量流式（PDF.js 首次加载会走这里）
+      const dlRes = await drive.files.get(
+        { fileId, alt: 'media' },
+        { responseType: 'stream' }
+      );
+      dlRes.data.pipe(res);
+    }
+  } catch (err) {
+    console.error('[Preview] 流式预览失败:', err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
 });
 
 loadPreviewCacheIndex();
@@ -326,6 +372,25 @@ app.use(session({
     maxAge: 24 * 60 * 60 * 1000 // 24h
   }
 }));
+// 根路径单独处理：注入版本号 + 禁止缓存（确保部署后浏览器加载最新页面）
+// 必须放在 express.static 之前，否则 / 会被 static 抢先匹配
+app.get('/', (req, res) => {
+  const htmlPath = path.join(__dirname, 'public', 'index.html');
+  fs.readFile(htmlPath, 'utf8', (err, content) => {
+    if (err) return res.status(500).send('Error loading index');
+    // 将前端版本号替换为服务端当前版本
+    const updated = content.replace(
+      /var APP_VERSION = '[^']*';/,
+      `var APP_VERSION = '${APP_VERSION}';`
+    );
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.type('html').send(updated);
+  });
+});
+
+// 静态文件服务（public/）
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── Google Drive — Service Account Auth ──────────────────────────────────
